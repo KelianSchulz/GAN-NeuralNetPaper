@@ -1,27 +1,19 @@
-# Generative Adversarial Networks: An Overview
+# GAN for Image Generation on the MNIST Dataset
 
-This repository contains a research paper on **Generative Adversarial Networks (GANs)**. The paper provides an overview of GANs, explains their components, and discusses related works in the field.
+This repository contains the source code and the PDF for the paper on **Generative Adversarial Networks (GANs)** applied to the MNIST dataset. The paper provides an overview of GANs, focusing on their application for generating images using the MNIST dataset.
 
 ## Contents
 
-- `paper.pdf`: The PDF version of the paper on GANs.
-- `bibliothek.bib`: The bibliography file containing the references used in the paper.
-- `paper.tex`: The LaTeX source code for the paper.
+- `GAN for Image Generation on the MNIST Dataset.pdf`: The PDF version of the research paper on GANs applied to the MNIST dataset.
+- `gan_model.py`: Python file with the code for the GAN model.
 
 ## Abstract
 
-Generative Adversarial Networks (GANs) have become a prominent area of research in machine learning and artificial intelligence. This paper provides a concise overview of GANs, explaining their structure, function, and applications. Additionally, it covers related works and highlights the potential future directions for research in this domain.
+Generative Adversarial Networks (GANs) are a powerful class of machine learning models that can generate realistic data. In this paper, we explore the use of GANs for generating handwritten digit images from the MNIST dataset. The model consists of two neural networks: a generator and a discriminator, which compete to create realistic images and distinguish real from fake data.
 
-## How to Compile the Paper
+## How to Run the Code
 
-To compile the paper from source, you need to have LaTeX installed on your system. You can use the following commands to generate the PDF:
-
-1. Clone or download this repository.
-2. Make sure you have LaTeX installed (you can download it from [here](https://www.latex-project.org/get/)).
-3. Run the following commands in your terminal:
+To run the Python code in `gan_model.py`, make sure you have Python installed on your system. You can then directly run the following command:
 
 ```bash
-pdflatex paper.tex
-biber paper
-pdflatex paper.tex
-pdflatex paper.tex
+python gan_model.py
