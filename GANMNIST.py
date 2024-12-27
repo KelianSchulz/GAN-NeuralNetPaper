@@ -11,7 +11,8 @@ from torch.utils.data import DataLoader, random_split
 from torchvision.datasets import MNIST
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
-
+from pytorch_lightning.callbacks import EarlyStopping 
+import torch.nn.init as init
 #-------------------------
 # Hyperparameters
 #-------------------------
@@ -65,6 +66,14 @@ class MNISTDataModule(pl.LightningDataModule):
 #-------------------------
 # Model
 #-------------------------
+
+def init_weights_he(module):
+    if isinstance(module, (nn.Conv2d, nn.Linear)):
+        init.kaiming_normal_(module.weight, nonlinearity='relu')
+        if module.bias is not None:
+            module.bias.data.fill_(0)
+
+
 class Discriminator(nn.Module):
     def __init__(self):
         super(Discriminator, self).__init__()
@@ -85,7 +94,8 @@ class Discriminator(nn.Module):
         self.fc1 = nn.Linear(256 * 7 * 7, 512)
         self.fc2 = nn.Linear(512, 1)
 
-        self.dropout = nn.Dropout(0.5)
+        self.dropout = nn.Dropout(0.7)
+        self.apply(init_weights_he)
 
     def forward(self, x):
         x = self.pool(F.relu(self.bn1(self.conv1(x))))
@@ -94,8 +104,8 @@ class Discriminator(nn.Module):
         x = F.relu(self.bn4(self.conv4(x)))
 
         x = x.view(-1, 256 * 7 * 7)
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = torch.sigmoid(self.fc2(x))
+        x = self.dropout(F.relu(self.fc1(x))) 
+        x = self.fc2(x) #Sigmoid function weg
         return x
 
 
@@ -137,7 +147,7 @@ class Generator(nn.Module):
         self.conv3 = nn.ConvTranspose2d(64, 1, kernel_size=3, stride=1, padding=1)
 
         self.tanh = nn.Tanh()
-
+        self.apply(init_weights_he)
     def forward(self, z):
         x = F.relu(self.fc1(z))
         x = x.view(-1, 256, 7, 7)
@@ -153,75 +163,103 @@ class Generator(nn.Module):
 
         return self.tanh(x)
 
+def wasserstein_loss(y_pred, y):
+    return torch.mean(y_pred * y)
+    
+
 
 #-------------------------
 # GAN 
 #-------------------------
 class GAN(pl.LightningModule):
-    def __init__(self, z_dim=100, lr=0.0002):
+
+    def __init__(self, z_dim=100, lr=0.00005):
         super().__init__()
         self.save_hyperparameters()
         self.generator = Generator(z_dim=self.hparams.z_dim).to(device)
         self.discriminator = Discriminator().to(device)
         self.validation_z = torch.randn(6, self.hparams.z_dim).to(device)
-        self.automatic_optimization = False
+        self.automatic_optimization = False  # Manuelle Optimierung
+
+    def compute_gradient_penalty(self, real_samples, fake_samples):
+        batch_size = real_samples.size(0)
+        alpha = torch.rand(batch_size, 1, 1, 1).to(device)
+        interpolates = (alpha * real_samples + (1 - alpha) * fake_samples).requires_grad_(True)
+        d_interpolates = self.discriminator(interpolates)
+        fake = torch.ones(batch_size, 1).to(device)
+        gradients = torch.autograd.grad(
+            outputs=d_interpolates,
+            inputs=interpolates,
+            grad_outputs=fake,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True
+        )[0]
+        gradients = gradients.view(batch_size, -1)
+        gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+        return gradient_penalty
+
+
 
     def forward(self, z):
         return self.generator(z)
 
-    def adversarial_loss(self, y_pred, y):
-        return F.binary_cross_entropy(y_pred, y)
-
     def training_step(self, batch, batch_idx):
         real_imgs, _ = batch
         real_imgs = real_imgs.to(device)
+        z = torch.randn(real_imgs.size(0), self.hparams.z_dim).to(device)
 
-        z = torch.randn(real_imgs.shape[0], self.hparams.z_dim).to(device)
-
-        # Generator Update
+        # Generator-Update bleibt gleich
         fake_imgs = self(z)
         fake_imgs = fake_imgs.to(device)
-        y_pred = self.discriminator(fake_imgs)
+        fake_pred = self.discriminator(fake_imgs)
+        g_loss = wasserstein_loss(fake_pred, torch.ones(fake_imgs.size(0), 1).to(device))
 
-        y = torch.ones(real_imgs.size(0), 1).to(device)
-
-        g_loss = self.adversarial_loss(y_pred, y)
-
-        log_dict = {"g_loss": g_loss}
-        # Manuelles Update des Generators
         opt_g = self.optimizers()[0]
         opt_g.zero_grad()
         g_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=1.0)
         opt_g.step()
 
-        # Diskriminator Update
-        fake_imgs = self(z)
-        fake_imgs = fake_imgs.to(device)
+        # Diskriminator-Update mit Gradient Penalty
+        fake_imgs = self(z).detach()
+        fake_pred = self.discriminator(fake_imgs)
         real_pred = self.discriminator(real_imgs)
-        fake_pred = self.discriminator(fake_imgs.detach())
 
-        y_real = torch.ones(real_imgs.size(0), 1).to(device)
-        y_fake = torch.zeros(real_imgs.size(0), 1).to(device)
 
-        real_loss = self.adversarial_loss(real_pred, y_real)
-        fake_loss = self.adversarial_loss(fake_pred, y_fake)
+        real_label_smooth = 0.9
+        fake_label_smooth = -0.1
 
-        d_loss = (real_loss + fake_loss) / 2  # d_loss initialisieren
+        real_loss = wasserstein_loss(real_pred, torch.full((real_imgs.size(0), 1), real_label_smooth).to(device))
+        fake_loss = wasserstein_loss(fake_pred, torch.full((fake_imgs.size(0), 1), fake_label_smooth).to(device))
 
-        log_dict["d_loss"] = d_loss
-        # Manuelles Update des Diskriminators
+        # Gradient Penalty
+        gradient_penalty = self.compute_gradient_penalty(real_imgs, fake_imgs)
+
+        lambda_gp = 1
+        d_loss = real_loss + fake_loss + lambda_gp * gradient_penalty
+
         opt_d = self.optimizers()[1]
         opt_d.zero_grad()
         d_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
         opt_d.step()
 
-        return {"loss": g_loss + d_loss, "progress_bar": log_dict, "log": log_dict}
+        self.log("g_loss", g_loss, prog_bar=True, on_step=True, on_epoch=True)
+        self.log("d_loss", d_loss, prog_bar=True, on_step=True, on_epoch=True)
+        self.log("gradient_penalty", gradient_penalty, prog_bar=True, on_step=True, on_epoch=True)
+
+        return {"loss": g_loss + d_loss}
 
 
     def configure_optimizers(self):
-        lr = self.hparams.lr
-        optimizer_g = torch.optim.Adam(self.generator.parameters(), lr=lr)
-        optimizer_d = torch.optim.Adam(self.discriminator.parameters(), lr=lr)
+        # Separate Learning Rates für Generator und Diskriminator
+        lr_g = 0.0001  # Learning Rate für den Generator
+        lr_d = 0.00003   # Learning Rate für den Diskriminator
+
+        # Optimizers definieren
+        optimizer_g = torch.optim.AdamW(self.generator.parameters(), lr=lr_g, betas=(0.5, 0.999))
+        optimizer_d = torch.optim.AdamW(self.discriminator.parameters(), lr=lr_d, betas=(0.5, 0.999))
 
         return [optimizer_g, optimizer_d], []
     
@@ -252,13 +290,23 @@ class GAN(pl.LightningModule):
     def on_train_end(self):
         # Plot at the end of the training
         self.plot_imgs()
-        torch.save(self.generator.state_dict(), 'generator.pth')
+        torch.save(self.generator.state_dict(), 'Wassersteingenerator.pth')
 
 # Model and DataModule Initialization
 datamodule = MNISTDataModule(data_dir="./data", batch_size=BATCH_SIZE)
 model = GAN()
 
-trainer = pl.Trainer(max_epochs=50)
+early_stopping = EarlyStopping(
+    monitor="g_loss",  
+    patience=10,       # Stoppt, wenn sich der Verlust 20 Epochen lang nicht verbessert
+    mode="min",    
+)    
+
+
+trainer = pl.Trainer(
+    max_epochs=500,    # Maximale Anzahl der Epochen
+    callbacks=[early_stopping]
+)
 trainer.fit(model, datamodule=datamodule)
 
 
