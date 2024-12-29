@@ -13,10 +13,11 @@ import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping 
 import torch.nn.init as init
+import numpy as np
 #-------------------------
 # Hyperparameters
 #-------------------------
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 AVAIL_GPUS = min(1, torch.cuda.device_count())
 
 
@@ -69,7 +70,7 @@ class MNISTDataModule(pl.LightningDataModule):
 
 def init_weights_he(module):
     if isinstance(module, (nn.Conv2d, nn.Linear)):
-        init.kaiming_normal_(module.weight, nonlinearity='relu')
+        init.kaiming_normal_(module.weight, nonlinearity='leaky_relu')
         if module.bias is not None:
             module.bias.data.fill_(0)
 
@@ -78,18 +79,18 @@ class Discriminator(nn.Module):
     def __init__(self):
         super(Discriminator, self).__init__()
         self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm2d(32)
+        self.in1 = nn.InstanceNorm2d(32, affine=True)  # InstanceNorm statt BatchNorm
         self.pool = nn.MaxPool2d(2, 2)
-        
+
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
+        self.in2 = nn.InstanceNorm2d(64, affine=True)  # InstanceNorm statt BatchNorm
         self.pool2 = nn.MaxPool2d(2, 2)
-        
+
         self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
-        
+        self.in3 = nn.InstanceNorm2d(128, affine=True)  # InstanceNorm statt BatchNorm
+
         self.conv4 = nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1)
-        self.bn4 = nn.BatchNorm2d(256)
+        self.in4 = nn.InstanceNorm2d(256, affine=True)  # InstanceNorm statt BatchNorm
 
         self.fc1 = nn.Linear(256 * 7 * 7, 512)
         self.fc2 = nn.Linear(512, 1)
@@ -98,45 +99,47 @@ class Discriminator(nn.Module):
         self.apply(init_weights_he)
 
     def forward(self, x):
-        x = self.pool(F.relu(self.bn1(self.conv1(x))))
-        x = self.pool2(F.relu(self.bn2(self.conv2(x))))
-        x = F.relu(self.bn3(self.conv3(x)))
-        x = F.relu(self.bn4(self.conv4(x)))
+        x = self.pool(F.relu(self.in1(self.conv1(x))))
+        x = self.pool2(F.relu(self.in2(self.conv2(x))))
+        x = F.relu(self.in3(self.conv3(x)))
+        x = F.relu(self.in4(self.conv4(x)))
 
         x = x.view(-1, 256 * 7 * 7)
         x = self.dropout(F.relu(self.fc1(x))) 
-        x = self.fc2(x) #Sigmoid function weg
+        x = self.fc2(x)  # Sigmoid function weglassen
         return x
+
 
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(ResidualBlock, self).__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.in1 = nn.InstanceNorm2d(out_channels)  # InstanceNorm statt BatchNorm
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.in2 = nn.InstanceNorm2d(out_channels)  # InstanceNorm statt BatchNorm
 
         # Shortcut-Verbindung
         self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
     
     def forward(self, x):
         identity = self.shortcut(x)  # Shortcut-Verbindung
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.relu(self.in1(self.conv1(x)))  # InstanceNorm angewendet
+        out = self.in2(self.conv2(out))  # InstanceNorm angewendet
         out += identity  # Residual-Verbindung
         out = self.relu(out)
         return out
+
 
 class Generator(nn.Module):
     def __init__(self, z_dim=100):
         super(Generator, self).__init__()
         self.fc1 = nn.Linear(z_dim, 256 * 7 * 7)
         self.conv1 = nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1)
-        self.bn1 = nn.BatchNorm2d(128)
+        self.in1 = nn.InstanceNorm2d(128)  # InstanceNorm statt BatchNorm
         self.conv2 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
+        self.in2 = nn.InstanceNorm2d(64)   # InstanceNorm statt BatchNorm
 
         # Residual Blocks
         self.resblock1 = ResidualBlock(128, 128)
@@ -148,20 +151,19 @@ class Generator(nn.Module):
 
         self.tanh = nn.Tanh()
         self.apply(init_weights_he)
+
     def forward(self, z):
         x = F.relu(self.fc1(z))
         x = x.view(-1, 256, 7, 7)
-        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.in1(self.conv1(x)))  # InstanceNorm angewendet
         x = self.resblock1(x)
-        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.in2(self.conv2(x)))  # InstanceNorm angewendet
         x = self.resblock2(x)
         x = self.resblock3(x)
 
         x = self.conv3(x)
-        
-      
-
         return self.tanh(x)
+
 
 def wasserstein_loss(y_pred, y):
     return torch.mean(y_pred * y)
@@ -172,21 +174,26 @@ def wasserstein_loss(y_pred, y):
 # GAN 
 #-------------------------
 class GAN(pl.LightningModule):
-
-    def __init__(self, z_dim=100, lr=0.00005):
+    def __init__(self, z_dim=100, lr=0.00005, d_steps=1):
         super().__init__()
         self.save_hyperparameters()
-        self.generator = Generator(z_dim=self.hparams.z_dim).to(device)
-        self.discriminator = Discriminator().to(device)
-        self.validation_z = torch.randn(6, self.hparams.z_dim).to(device)
+        self.generator = Generator(z_dim=self.hparams.z_dim).to(self.device)
+        self.discriminator = Discriminator().to(self.device)
+        self.validation_z = torch.randn(6, self.hparams.z_dim).to(self.device)
         self.automatic_optimization = False  # Manuelle Optimierung
+
+    def validation_step(self, batch, batch_idx):
+        
+        pass
+
+
 
     def compute_gradient_penalty(self, real_samples, fake_samples):
         batch_size = real_samples.size(0)
-        alpha = torch.rand(batch_size, 1, 1, 1).to(device)
+        alpha = torch.rand(batch_size, 1, 1, 1).to(self.device)
         interpolates = (alpha * real_samples + (1 - alpha) * fake_samples).requires_grad_(True)
         d_interpolates = self.discriminator(interpolates)
-        fake = torch.ones(batch_size, 1).to(device)
+        fake = torch.ones(batch_size, 1).to(self.device)
         gradients = torch.autograd.grad(
             outputs=d_interpolates,
             inputs=interpolates,
@@ -199,52 +206,50 @@ class GAN(pl.LightningModule):
         gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
         return gradient_penalty
 
-
-
     def forward(self, z):
         return self.generator(z)
 
     def training_step(self, batch, batch_idx):
         real_imgs, _ = batch
-        real_imgs = real_imgs.to(device)
-        z = torch.randn(real_imgs.size(0), self.hparams.z_dim).to(device)
+        real_imgs = real_imgs.to(self.device)
 
-        # Generator-Update bleibt gleich
-        fake_imgs = self(z)
-        fake_imgs = fake_imgs.to(device)
-        fake_pred = self.discriminator(fake_imgs)
-        g_loss = wasserstein_loss(fake_pred, torch.ones(fake_imgs.size(0), 1).to(device))
+        # ===== Diskriminator-Update =====
+        z = torch.randn(real_imgs.size(0), self.hparams.z_dim, device=self.device)
+        fake_imgs = self(z).detach()  # Generator-Ausgabe (ohne Gradienten)
+        fake_imgs = fake_imgs.to(self.device)
 
-        opt_g = self.optimizers()[0]
-        opt_g.zero_grad()
-        g_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=1.0)
-        opt_g.step()
-
-        # Diskriminator-Update mit Gradient Penalty
-        fake_imgs = self(z).detach()
-        fake_pred = self.discriminator(fake_imgs)
+        # Diskriminator Vorhersagen
         real_pred = self.discriminator(real_imgs)
-
-
-        real_label_smooth = 0.9
-        fake_label_smooth = -0.1
-
-        real_loss = wasserstein_loss(real_pred, torch.full((real_imgs.size(0), 1), real_label_smooth).to(device))
-        fake_loss = wasserstein_loss(fake_pred, torch.full((fake_imgs.size(0), 1), fake_label_smooth).to(device))
+        fake_pred = self.discriminator(fake_imgs)
 
         # Gradient Penalty
         gradient_penalty = self.compute_gradient_penalty(real_imgs, fake_imgs)
 
-        lambda_gp = 1
-        d_loss = real_loss + fake_loss + lambda_gp * gradient_penalty
+        # Gesamtverlust für Diskriminator
+        lambda_gp = 5  # WGAN-GP Penalty
+        d_loss = -torch.mean(real_pred) + torch.mean(fake_pred) + lambda_gp * gradient_penalty
 
+        # 1 Schritt für den Diskriminator
         opt_d = self.optimizers()[1]
         opt_d.zero_grad()
         d_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
         opt_d.step()
 
+        # ===== Generator-Update =====
+        z = torch.randn(real_imgs.size(0), self.hparams.z_dim, device=self.device)
+        fake_imgs = self(z)  # Generator-Ausgabe
+        fake_pred = self.discriminator(fake_imgs)
+
+        # Generator optimieren (minimiere -D(G(z)))
+        g_loss = -torch.mean(fake_pred)
+
+        # 1 Schritt für den Generator
+        opt_g = self.optimizers()[0]
+        opt_g.zero_grad()
+        g_loss.backward()
+        opt_g.step()
+
+        # ===== Logging =====
         self.log("g_loss", g_loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log("d_loss", d_loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log("gradient_penalty", gradient_penalty, prog_bar=True, on_step=True, on_epoch=True)
@@ -252,61 +257,74 @@ class GAN(pl.LightningModule):
         return {"loss": g_loss + d_loss}
 
 
+
     def configure_optimizers(self):
         # Separate Learning Rates für Generator und Diskriminator
-        lr_g = 0.0001  # Learning Rate für den Generator
-        lr_d = 0.00003   # Learning Rate für den Diskriminator
+        lr_g = 0.0001  # Lernrate für den Generator
+        lr_d = 0.00005  # Lernrate für den Discriminator
 
-        # Optimizers definieren
+        # Optimizer definieren
         optimizer_g = torch.optim.AdamW(self.generator.parameters(), lr=lr_g, betas=(0.5, 0.999))
         optimizer_d = torch.optim.AdamW(self.discriminator.parameters(), lr=lr_d, betas=(0.5, 0.999))
 
-        return [optimizer_g, optimizer_d], []
-    
-    def plot_imgs(self):
-        z = self.validation_z.type_as(self.generator.fc1.weight).to(device)
+         # Rückgabe der Optimizer
+        return [optimizer_g, optimizer_d], []  # Wir geben eine Liste von Optimierern zurück
+
+    def plot_imgs(self, epoch, num_images=20):
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        z = torch.randn(num_images, self.hparams.z_dim).to(device)
         sample_imgs = self(z).cpu()
 
-        # Display generated images and discriminator predictions
-        fig = plt.figure(figsize=(10, 10)) 
-        for i in range(sample_imgs.size(0)):
-            plt.subplot(2, 3, i+1)
-            plt.tight_layout()
-            plt.imshow(sample_imgs[i, 0, :, :].detach().numpy(), cmap="gray_r", interpolation="none")  # .detach() hier verwenden
+        rows = int(np.sqrt(num_images))
+        cols = int(np.ceil(num_images / rows))
+        fig, axes = plt.subplots(rows, cols, figsize=(10, 10))
+        axes = axes.flatten()
+
+        for i in range(num_images):
+            axes[i].imshow(sample_imgs[i, 0, :, :].detach().numpy(), cmap="gray_r", interpolation="none")
             fake_pred = self.discriminator(sample_imgs[i].unsqueeze(0).to(device)).cpu().detach()
-            title = f"Fake: {fake_pred.item():.2f}"
-            plt.title(title)
-            plt.xticks([])
-            plt.yticks([])
-            plt.axis("off")
+            axes[i].set_title(f"Fake: {fake_pred.item():.2f}")
+            axes[i].axis('off')
 
-        plt.show()
+        plt.tight_layout()
+        plt.savefig(f"generated_images_epoch_{epoch}.png")
+        plt.close()
+
+        
+
+class GANCallback(pl.Callback):
+    def on_train_end(self, trainer, pl_module):
+        # Bilder am Ende des Trainings generieren
+        print("Training beendet - Generiere finale Bilder")
+        pl_module.plot_imgs('final')
+        torch.save(pl_module.generator.state_dict(), 'Wassersteingenerator_final.pth')
+        torch.save(pl_module.discriminator.state_dict(), 'WassersteinDiscriminator_final.pth')
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        epoch = trainer.current_epoch
+        print(f"Current Epoch: {epoch}")  # Debug-Ausgabe, um die aktuelle Epoche zu überprüfen
+        if epoch % 25 == 0:  # Sicherstellen, dass auch bei Epoche 0 gespei  chert wird
+            print(f"Saving model and images at epoch {epoch}")  # Debug-Ausgabe
+            pl_module.plot_imgs(epoch)
+            torch.save(pl_module.generator.state_dict(), f'Wassersteingenerator_epoch_{epoch}.pth')
+            torch.save(pl_module.discriminator.state_dict(), f'WassersteinDiscriminator_epoch_{epoch}.pth')
 
 
-    def on_epoch_end(self):
-        # Plot after every epoch
-        self.plot_imgs()
 
-    def on_train_end(self):
-        # Plot at the end of the training
-        self.plot_imgs()
-        torch.save(self.generator.state_dict(), 'Wassersteingenerator.pth')
-
-# Model and DataModule Initialization
+# Model und DataModule Initialisierung
 datamodule = MNISTDataModule(data_dir="./data", batch_size=BATCH_SIZE)
 model = GAN()
 
 early_stopping = EarlyStopping(
     monitor="g_loss",  
-    patience=10,       # Stoppt, wenn sich der Verlust 20 Epochen lang nicht verbessert
+    patience=20,       # Stoppt, wenn sich der Verlust 10 Epochen lang nicht verbessert
     mode="min",    
-)    
-
+)
 
 trainer = pl.Trainer(
-    max_epochs=500,    # Maximale Anzahl der Epochen
-    callbacks=[early_stopping]
+    max_epochs=200,    # Maximale Anzahl der Epochen
+    callbacks=[early_stopping, GANCallback()],  
 )
+
 trainer.fit(model, datamodule=datamodule)
-
-
